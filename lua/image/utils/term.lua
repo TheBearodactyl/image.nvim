@@ -1,66 +1,93 @@
+local ffi = require("ffi")
+
+ffi.cdef([[
+  typedef void* HANDLE;
+  typedef uint32_t DWORD;
+  typedef int BOOL;
+  typedef uint16_t WORD;
+  typedef int16_t SHORT;
+
+  typedef struct {
+    SHORT Left;
+    SHORT Top;
+    SHORT Right;
+    SHORT Bottom;
+  } SMALL_RECT;
+
+  typedef struct {
+    WORD X;
+    WORD Y;
+  } COORD;
+
+  typedef struct {
+    COORD dwSize;
+    COORD dwCursorPosition;
+    WORD  wAttributes;
+    SMALL_RECT srWindow;
+    COORD dwMaximumWindowSize;
+  } CONSOLE_SCREEN_BUFFER_INFO;
+
+  HANDLE GetStdHandle(DWORD nStdHandle);
+  BOOL GetConsoleScreenBufferInfo(HANDLE hConsoleOutput, CONSOLE_SCREEN_BUFFER_INFO* lpConsoleScreenBufferInfo);
+
+  COORD GetCurrentConsoleFont(HANDLE hConsoleOutput, BOOL bMaximumWindow);
+  COORD GetConsoleFontSize(HANDLE hConsoleOutput, COORD dwFont);
+]])
+
+local STD_OUTPUT_HANDLE = -11
 local cached_size = {
-  screen_x = 0,
-  screen_y = 0,
   screen_cols = 0,
   screen_rows = 0,
-  cell_width = 0,
-  cell_height = 0,
+  -- pixel dims are optional / approximate
+  cell_width = nil,
+  cell_height = nil,
 }
 
--- https://github.com/edluffy/hologram.nvim/blob/main/lua/hologram/state.lua#L15
 local update_size = function()
-  local ffi = require("ffi")
-  ffi.cdef([[
-    typedef struct {
-      unsigned short row;
-      unsigned short col;
-      unsigned short xpixel;
-      unsigned short ypixel;
-    } winsize;
-    int ioctl(int, int, ...);
-  ]])
+  local hOut = ffi.C.GetStdHandle(STD_OUTPUT_HANDLE)
+  if hOut == ffi.cast("HANDLE", 0) then return end
 
-  local TIOCGWINSZ = nil
-  if vim.fn.has("linux") == 1 then
-    TIOCGWINSZ = 0x5413
-  elseif vim.fn.has("mac") == 1 then
-    TIOCGWINSZ = 0x40087468
-  elseif vim.fn.has("bsd") == 1 then
-    TIOCGWINSZ = 0x40087468
+  local csbi = ffi.new("CONSOLE_SCREEN_BUFFER_INFO")
+  local ok = ffi.C.GetConsoleScreenBufferInfo(hOut, csbi)
+  if ok == 0 then return end
+
+  local cols = csbi.srWindow.Right - csbi.srWindow.Left + 1
+  local rows = csbi.srWindow.Bottom - csbi.srWindow.Top + 1
+
+  cached_size.screen_cols = cols
+  cached_size.screen_rows = rows
+
+  local font_coord = ffi.C.GetCurrentConsoleFont(hOut, false) -- FALSE for not maximum
+  if font_coord.X ~= 0 and font_coord.Y ~= 0 then
+    local font_size = ffi.C.GetConsoleFontSize(hOut, font_coord)
+    cached_size.cell_width = font_size.X
+    cached_size.cell_height = font_size.Y
+  else
+    cached_size.cell_width = nil
+    cached_size.cell_height = nil
   end
-
-  ---@type { row: number, col: number, xpixel: number, ypixel: number }
-  local sz = ffi.new("winsize")
-  assert(ffi.C.ioctl(1, TIOCGWINSZ, sz) == 0, "Failed to get terminal size")
-
-  cached_size = {
-    screen_x = sz.xpixel,
-    screen_y = sz.ypixel,
-    screen_cols = sz.col,
-    screen_rows = sz.row,
-    cell_width = sz.xpixel / sz.col,
-    cell_height = sz.ypixel / sz.row,
-  }
 end
 
 update_size()
-vim.api.nvim_create_autocmd("VimResized", {
-  callback = update_size,
-})
+
+if vim and vim.api and vim.api.nvim_create_autocmd then
+  vim.api.nvim_create_autocmd("VimResized", {
+    callback = update_size,
+  })
+end
 
 local get_tty = function()
-  local handle = io.popen("tty 2>/dev/null")
-  if not handle then return nil end
-  local result = handle:read("*a")
-  handle:close()
-  result = vim.fn.trim(result)
-  if result == "" then return nil end
-  return result
+  return "CONOUT$"
 end
 
 return {
   get_size = function()
-    return cached_size
+    return {
+      screen_cols = cached_size.screen_cols,
+      screen_rows = cached_size.screen_rows,
+      cell_width = cached_size.cell_width,
+      cell_height = cached_size.cell_height,
+    }
   end,
   get_tty = get_tty,
 }
